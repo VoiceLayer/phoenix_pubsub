@@ -9,15 +9,40 @@ defmodule Phoenix.PubSub.PG2Server do
   end
 
   def direct_broadcast(fastlane, server_name, pool_size, node_name, from_pid, topic, msg) do
-    server_name
-    |> get_members(node_name)
-    |> do_broadcast(fastlane, server_name, pool_size, from_pid, topic, msg)
+    members = get_members(server_name, node_name)
+    v2_direct_broadcast(members, server_name, node_name, topic, msg)
+    do_broadcast(members, fastlane, server_name, pool_size, from_pid, topic, msg)
   end
 
   def broadcast(fastlane, server_name, pool_size, from_pid, topic, msg) do
-    server_name
-    |> get_members()
-    |> do_broadcast(fastlane, server_name, pool_size, from_pid, topic, msg)
+    members = get_members(server_name)
+    v2_broadcast(members, server_name, topic, msg)
+    do_broadcast(members, fastlane, server_name, pool_size, from_pid, topic, msg)
+  end
+
+  defp v2_direct_broadcast(v1_members, server_name, node_name, topic, msg) do
+    server_name = Module.concat(server_name, "Adapter")
+    v2_members = get_members(server_name, node_name)
+    members = v2_members -- v1_members
+    do_v2_broadcast(members, server_name, topic, msg)
+  end
+
+  defp v2_broadcast(v1_members, server_name, topic, msg) do
+    server_name = Module.concat(server_name, "Adapter")
+    v2_members = get_members(server_name)
+    members = v2_members -- v1_members
+    do_v2_broadcast(members, server_name, topic, msg)
+  end
+
+  defp do_v2_broadcast({:error, {:no_such_group, _}}, _server, _topic, _msg) do
+    {:error, :no_such_group}
+  end
+
+  defp do_v2_broadcast(pids, server, topic, msg) do
+    Enum.each(pids, fn pid_or_tuple ->
+        send(pid_or_tuple, {:forward_to_local, topic, msg, Phoenix.PubSub})
+    end)
+    :ok
   end
 
   defp do_broadcast({:error, {:no_such_group, _}}, _fastlane, _server, _pool, _from, _topic, _msg) do
@@ -43,6 +68,11 @@ defmodule Phoenix.PubSub.PG2Server do
     :ok = :pg2.create(pg2_group)
     :ok = :pg2.join(pg2_group, self())
 
+    adapter_server_name = Module.concat(server_name, "Adapter")
+    adapter_pg2_group = pg2_namespace(adapter_server_name)
+    :ok = :pg2.create(adapter_pg2_group)
+    :ok = :pg2.join(adapter_pg2_group, self())
+
     {:ok, %{name: server_name, pool_size: pool_size}}
   end
 
@@ -50,6 +80,11 @@ defmodule Phoenix.PubSub.PG2Server do
     # The whole broadcast will happen inside the current process
     # but only for messages coming from the distributed system.
     Local.broadcast(fastlane, state.name, state.pool_size, from_pid, topic, msg)
+    {:noreply, state}
+  end
+
+  def handle_info({:forward_to_local, topic, msg, _dispatcher}, state) do
+    Local.broadcast(nil, state.name, state.pool_size, self(), topic, msg)
     {:noreply, state}
   end
 
